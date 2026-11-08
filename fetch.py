@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-每日简报自动抓取脚本（澎湃新闻 + 天气）
+每日简报自动抓取脚本 v2（澎湃首页头条 + 天气）
 运行环境：GitHub Actions（也可以本地 python3 fetch.py 手动跑）
 产物：
   1. jianbao-YYYY-MM-DD.html —— 当天简报页（按北京时间日期）
   2. index.html —— 目录页（自动重建，最新一期在最上面）
 依赖：仅 Python 标准库，不需要 pip 安装任何东西
+数据来源：澎湃手机版首页 m.thepaper.cn 内嵌的 __NEXT_DATA__（与 RSSHub 头条路由同源），
+         取首页文章列表，保持编辑排好的原始顺序，不按时间重排。
 """
 
 import json
@@ -18,32 +20,23 @@ from zoneinfo import ZoneInfo
 
 # ================= 配置区（按需修改） =================
 # 天气城市：改成你自己城市的名称和经纬度（经纬度可搜“城市名 经纬度”）
-CITY_NAME = "武汉"
-LAT, LON = 30.5928, 114.3055
+CITY_NAME = "北京"
+LAT, LON = 39.9042, 116.4074
 
-# 澎湃频道：(频道ID, 频道名)，常用：
-#   25950 时事 | 25951 财经 | 119908 科技 | 122908 国际 | -21 体育 | 25953 生活 | 25952 思想
-CHANNELS = [
-    (25950, "时事"),
-    (119908, "科技"),
-]
-PER_CHANNEL = 10      # 每个频道最多取几条
-MAX_ITEMS = 20        # 简报页总条数上限
+MAX_ITEMS = 20        # 头条最多取几条
 # =====================================================
 
 TZ = ZoneInfo("Asia/Shanghai")
 TODAY = datetime.now(TZ).strftime("%Y-%m-%d")
 OUT_PAGE = f"jianbao-{TODAY}.html"
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
+UA = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"}
 
 
-def http_post_json(url, payload, timeout=30):
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data,
-                                 headers={**UA, "Content-Type": "application/json"})
+def http_get_text(url, timeout=30, extra_headers=None):
+    req = urllib.request.Request(url, headers={**UA, **(extra_headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+        return r.read().decode("utf-8", "ignore")
 
 
 def http_get_json(url, timeout=30):
@@ -57,31 +50,48 @@ def esc(s):
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-# ---------------- 澎湃新闻 ----------------
-def fetch_thepaper(channel_id, channel_name):
-    """澎湃官方接口（RSSHub 开源代码同款）：按频道返回最新文章列表。"""
-    url = "https://api.thepaper.cn/contentapi/nodeCont/getByChannelId"
-    resp = http_post_json(url, {"channelId": channel_id})
-    items = ((resp.get("data") or {}).get("list")) or []
-    if items:
-        # 方便第一次运行时在 Actions 日志里核对字段名
-        print(f"[澎湃/{channel_name}] 返回 {len(items)} 条，首条字段：{list(items[0].keys())}",
+def parse_item(it):
+    """容错解析一篇文章条目（字段名以澎湃现行结构为主，取不到就跳过）。"""
+    title = it.get("name") or it.get("title") or ""
+    if not title:
+        return None
+    cont_id = it.get("contId") or it.get("contentId") or it.get("id") or ""
+    link = it.get("link") or it.get("url") or (
+        f"https://www.thepaper.cn/newsDetail_forward_{cont_id}" if cont_id
+        else "https://www.thepaper.cn")
+    ts = it.get("pubTimeLong") or it.get("publishTimeLong") or 0
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        ts = 0
+    summary = it.get("summary") or it.get("description") or ""
+    return {"title": title, "link": link, "ts": ts, "summary": summary,
+            "source": "澎湃·头条"}
+
+
+# ---------------- 澎湃首页头条 ----------------
+def fetch_featured():
+    html = http_get_text("https://m.thepaper.cn",
+                         extra_headers={"Cookie": "blackAndWhiteMode=0; redTops=0;"})
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    if not m:
+        raise RuntimeError("页面里没找到 __NEXT_DATA__，澎湃可能改版了")
+    data = json.loads(m.group(1))
+    page_props = ((data.get("props") or {}).get("pageProps") or {})
+    main_list = ((page_props.get("data") or {}).get("list")) or []
+    top_list = ((page_props.get("topData") or {}).get("recommendImg")) or []
+    raw = list(main_list) + list(top_list)
+    if raw:
+        print(f"[澎湃头条] 原始 {len(raw)} 条，首条字段：{list(raw[0].keys())}",
               file=sys.stderr)
-    out = []
-    for it in items[:PER_CHANNEL]:
-        title = it.get("name") or it.get("title") or ""
-        cont_id = it.get("contId") or it.get("contentId") or it.get("id") or ""
-        link = it.get("link") or (f"https://www.thepaper.cn/newsDetail_forward_{cont_id}"
-                                   if cont_id else "https://www.thepaper.cn")
-        ts = it.get("pubTimeLong") or it.get("publishTimeLong") or 0
-        try:
-            ts = int(ts)
-        except (TypeError, ValueError):
-            ts = 0
-        summary = it.get("summary") or it.get("description") or ""
-        if title:
-            out.append({"title": title, "link": link, "ts": ts,
-                        "summary": summary, "source": f"澎湃·{channel_name}"})
+    out, seen = [], set()
+    for it in raw:
+        n = parse_item(it)
+        if n and n["link"] not in seen:
+            seen.add(n["link"])
+            out.append(n)
+        if len(out) >= MAX_ITEMS:
+            break
     return out
 
 
@@ -147,12 +157,13 @@ def render_daily(news, weather):
     items_html = ""
     for n in news:
         sum_html = f'<div class="sum">{esc(n["summary"])}</div>' if n["summary"] else ""
+        t = fmt_time(n["ts"])
+        meta = f'{esc(n["source"])} · {t}' if t else esc(n["source"])
         items_html += (f'<div class="item"><a href="{esc(n["link"])}" target="_blank" '
                        f'rel="noopener">{esc(n["title"])}</a>'
-                       f'<div class="meta">{esc(n["source"])} · {fmt_time(n["ts"])}</div>'
-                       f'{sum_html}</div>\n')
+                       f'<div class="meta">{meta}</div>{sum_html}</div>\n')
     if not items_html:
-        items_html = '<div class="item">今天没有抓到条目，可能是接口临时异常，看 Actions 日志排查。</div>'
+        items_html = '<div class="item">今天没有抓到条目，可能是澎湃改版或临时异常，看 Actions 日志排查。</div>'
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -164,7 +175,7 @@ def render_daily(news, weather):
 <body>
 <div class="wrap">
   <h1>今日简报 · {TODAY}</h1>
-  <div class="sub">澎湃新闻自动抓取 · 点标题看原文</div>
+  <div class="sub">澎湃首页头条自动抓取 · 点标题看原文</div>
   {wx_html}
   {items_html}
 </div>
@@ -190,7 +201,7 @@ def render_index():
 <body>
 <div class="wrap">
   <h1>每日简报</h1>
-  <div class="sub">澎湃新闻 · 天气 · 自动更新</div>
+  <div class="sub">澎湃头条 · 天气 · 自动更新</div>
   <ul class="idx">
 {lis}
   </ul>
@@ -201,17 +212,11 @@ def render_index():
 
 
 def main():
-    news, seen = [], set()
-    for cid, cname in CHANNELS:
-        try:
-            for n in fetch_thepaper(cid, cname):
-                if n["link"] not in seen:
-                    seen.add(n["link"])
-                    news.append(n)
-        except Exception as e:  # 单个频道失败不影响整期
-            print(f"[澎湃/{cname}] 抓取失败：{e}", file=sys.stderr)
-    news.sort(key=lambda x: x["ts"], reverse=True)
-    news = news[:MAX_ITEMS]
+    news = []
+    try:
+        news = fetch_featured()
+    except Exception as e:
+        print(f"[澎湃头条] 抓取失败：{e}", file=sys.stderr)
 
     weather = None
     try:
