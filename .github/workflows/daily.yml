@@ -4,7 +4,7 @@ name: Daily Brief
 # 也可以在 Actions 页面点 Run workflow 手动跑一次
 on:
   schedule:
-    - cron: "30 22 * * *"
+    - cron: "7 17 * * *"
   workflow_dispatch:
 
 permissions:
