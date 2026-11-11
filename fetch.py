@@ -179,6 +179,14 @@ def render_daily(news, weather):
   {wx_html}
   {items_html}
 </div>
+<script>
+// 电脑打开保持电脑版链接；手机打开自动把澎湃链接换成手机版
+if (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)) {{
+  document.querySelectorAll('a[href*="www.thepaper.cn"]').forEach(function (a) {{
+    a.href = a.href.replace("www.thepaper.cn", "m.thepaper.cn");
+  }});
+}}
+</script>
 </body>
 </html>
 """
